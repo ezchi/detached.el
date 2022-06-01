@@ -379,8 +379,7 @@ The session is compiled by opening its output and enabling
   (interactive
    (list (detached-completing-read (detached-get-sessions))))
   (when (detached-valid-session session)
-    (if (or (eq 'inactive (detached--session-state session))
-            (not (detached--session-attachable session)))
+    (if (eq 'inactive (detached--session-state session))
         (detached-view-dwim session)
       (if-let ((attach-fun (plist-get (detached--session-action session) :attach)))
           (funcall attach-fun session)
@@ -600,24 +599,29 @@ Optionally SUPPRESS-OUTPUT."
         (detached--current-session
          (or detached--current-session
              (detached-create-session command))))
-    (if-let ((run-in-background
-              (and (or suppress-output
-                       (eq detached-session-mode 'create)
-                       (not (detached--session-attachable detached--current-session)))))
-             (detached-session-mode 'create))
-        (progn (setq detached-enabled nil)
-               (if detached-local-session
-                   (apply #'start-process-shell-command
-                          `("detached" nil ,(detached-dtach-command detached--current-session t)))
-                 (apply #'start-file-process-shell-command
-                        `("detached" nil ,(detached-dtach-command detached--current-session t)))))
+    (when-let ((run-in-background
+                (and (or suppress-output
+                         (eq detached-session-mode 'create)
+                         (not (detached--session-attachable detached--current-session)))))
+               (detached-session-mode 'create))
+      (setq detached-enabled nil)
+      (if detached-local-session
+          (apply #'start-process-shell-command
+                 `("detached" nil ,(detached-dtach-command detached--current-session t)))
+        (apply #'start-file-process-shell-command
+               `("detached" nil ,(detached-dtach-command detached--current-session t)))))
+    (unless suppress-output
       (cl-letf* ((detached-session-mode 'create-and-attach)
                  ((symbol-function #'set-process-sentinel) #'ignore)
-                 (buffer (get-buffer-create detached--shell-command-buffer)))
+                 (buffer (get-buffer-create detached--shell-command-buffer))
+                 (command (if (detached--session-attachable detached--current-session)
+                              (detached-dtach-command detached--current-session t)
+                            (concat "tail --follow=name --retry --lines=50 --silent"
+                                    (detached--session-file detached--current-session 'log t)))))
         (when (get-buffer-process buffer)
           (setq buffer (generate-new-buffer (buffer-name buffer))))
         (setq detached-enabled nil)
-        (funcall #'async-shell-command (detached-dtach-command detached--current-session t) buffer)
+        (funcall #'async-shell-command command buffer)
         (with-current-buffer buffer (setq detached--buffer-session detached--current-session))))))
 
 (defun detached-session-candidates (sessions)
@@ -770,16 +774,17 @@ This function uses the `notifications' library."
   (let* ((detached--current-session session)
          (detached-session-mode 'attach)
          (inhibit-message t))
-    (if (not (detached--session-attachable session))
-        (detached-view-session session)
-      (cl-letf* (((symbol-function #'set-process-sentinel) #'ignore)
-                 (buffer (get-buffer-create detached--shell-command-buffer))
-                 (default-directory (detached--session-working-directory session))
-                 (dtach-command (detached-dtach-command session t)))
-        (when (get-buffer-process buffer)
-          (setq buffer (generate-new-buffer (buffer-name buffer))))
-        (funcall #'async-shell-command dtach-command buffer)
-        (with-current-buffer buffer (setq detached--buffer-session detached--current-session))))))
+    (cl-letf* (((symbol-function #'set-process-sentinel) #'ignore)
+               (buffer (get-buffer-create detached--shell-command-buffer))
+               (default-directory (detached--session-working-directory session))
+               (command (if (detached--session-attachable session)
+                            (detached-dtach-command session t)
+                          (concat "tail --follow=name --retry --lines=50 --silent"
+                                    (detached--session-file detached--current-session 'log t)))))
+      (when (get-buffer-process buffer)
+        (setq buffer (generate-new-buffer (buffer-name buffer))))
+      (funcall #'async-shell-command command buffer)
+      (with-current-buffer buffer (setq detached--buffer-session detached--current-session)))))
 
 (defun detached-session-exit-code (session)
   "Return exit code for SESSION."
